@@ -59,13 +59,13 @@ I'll go into some detail to show how the model works, and show simulation result
 ## 1. Statistical definition of the model
 
 ### 1.a Starting with linear regression and the 'broken stick' model
-Recall that in linear regression, we estimate the rate of change of $y$ as $x_1$ changes; this value is the slope parameter $\beta_1$\*. This enforces the assumption that the relationship between $y$ and $x_1$ is linear. What if we thought that the relationship between $y$ and $x_1$ changed at some point. The point where we let the slope change is called a **knot**. We could have two slope parameters, $\beta_{1,1}$ and $\beta_{1,2}$, where the relationship of $y$ and $x_1$ is $\beta_{1,1}$ when $x_1<mean(x_1)$ and is $\beta_{1,2}$ when $x_1>=mean(x_1)$. This is called a "broken stick" model, and it's often referred to as the simplest spline. 
+Recall that in linear regression, we estimate the rate of change of $y$ as $x_1$ changes; this value is the slope parameter $\beta_1$\*. This enforces the assumption that the relationship between $y$ and $x_1$ is linear. What if we thought that the relationship between $y$ and $x_1$ changed at some point. The point where we let the slope change is called a **knot**. We would have two slope parameters, $\beta_{1,1}$ and $\beta_{1,2}$, where the relationship of $y$ and $x_1$ is $\beta_{1,1}$ when $x_1<knot$ and is $\beta_{1,2}$ when $x_1>=knot$. This is called a "broken stick" model, and it's often referred to as the simplest spline. 
 
 
 #### 1.aa Simulating broken stick data
 Let's simulate data based on this model, and plot it. II'll use the steps I previously outlined to create a simulation.
 
-First I'll make some fake observations in the `x_i` vector, and two slope parameters held in the `beta_k` vector
+First I'll make some fake observations in the `x_i` vector, and two slope parameters held in the `beta_k` vector. I'm going to say the knot is set where $x_1=1$
 ```{r}
 n_obs <- 1000
 ##sy: first simulate a continuous variable x1
@@ -75,20 +75,70 @@ x_1 <- rnorm(n_obs)
 beta_k <- c(0.5, 2.5)
 ```
 
-
-Now I'll calculate the **linear predictor** for each row, and hold it in the `linpred_i` vector. The ``ifelse()`` statement below says to multiply the value of `x_i` by $\beta_{1,1}$ if `x_i` is less than 0, and by $\beta_{1,2}$ if `x_i` is greater than or equal to 0. In this case, '0' is where I've set the knot for the simulated data
-```{r}
-##sy: calculate the true linear predictor using the broken stick approach
-linpred_i <- ifelse(x_1 < mean(x_1), x_1 * beta_k[1], x_1 * beta_k[2])
-```
-
 ##### 1.aaa Introducing an aggregator design matrix
 
-#### 1.ab Finish 
+Now I need to calculate the **linear predictor** for each row. We can't just apply the slope of each segment to values of $x_1$ that fall in that segment. I'll illustrate why. To calculate $y$ when $x_1<knot$, say $x_1=-2$:
+$$
+y=\beta_{1,1}*-2=0.5*-2=-1
+$$
+Same as with linear regression. But we wanted to calulcate $y$ when $x_1=2$, we can't just calculate 
+$$
+y=\beta_{1,1}*2=2.5*2=5
+$$
+That's because the $x_1$ relationship with $y$ hasn't been consistent.  Below I'll plot the data as if I had done the math above for every data point.
 
-The ``ifelse()`` statement above is concise, but not very generalizable if we want to add more knots
+```{r}
+##sy: calculate the true linear predictor using the wrong approach
+bad_linpred_i <- ifelse(x_1 < 1, x_1 * beta_k[1], x_1 * beta_k[2])
 
-Finally I'll add some stochastic noise to get our simulated observed data, stored in the `obs_i` vector. Then I'll plot `x_i` against `obs_i`
+p<-plot(x_1, bad_linpred_i)
+
+```
+
+ Notice the discontinuity. We need to account for the domain of $x_1$ where the relationship was different. I'll use an **aggregator** matrix to solve this problem. This is a matrix that sums up the effect of all segments preceeding a value of $x_1$ to arrive at the effect of $y$ given a specific value of $x_1$. Here's how we would calculate $y$ if $x_1=1$:
+ 
+ $$
+ y=\beta_{1,1}*(knot)+\beta_{1,2}*(x_1-knot)=1*1+2.5*(2-1)=1+2.5=3
+ $$
+We can represent this in a design matrix with two columns, $x_{1,1}$ and $x_{1,2}$, which will be multiplied by $\beta_{1,1}$ and $\beta_{1,2}$, respectively. If $x_1<knot$, then $x_{1,1}=x_1$ and $x_{1,2}=0$ (and the we get the same answer as linear regression). If $x_1>=knot$, then  $x_{1,1}=knot$ and $x_{1,2}=x_1-knot$. So we'll be adding the effect of $\beta_{1,1}$ up to the knot, and the effect of $\beta_{1,2}$ after the knot. I'll make this design matrix below, called `A_ik`, (A for aggregator, i for number of observations (rows), k for number of betas (columns)):
+
+
+```{r}
+A_ik = matrix(nrow = n_obs, ncol = 2)
+
+##sy: first column is x_1 if x_1<knot, otherwise equal to knot
+A_ik[, 1] = ifelse(x_1 < 1, x_1, 1)
+
+##sy: second column is 0 if x_1<knot, otherwise equal to x_1-knot
+A_ik[, 2] = ifelse(x_1 < 1, 0, x_1 - 1)
+
+```
+
+Let's look at some rows of `A_ik` where $x_1<knot$:
+
+```{r}
+head(A_ik[x_1 < 1, ])
+```
+
+And now for some rows where $x_1>=knot$:
+
+```{r}
+head(A_ik[x_1 >= 1, ])
+```
+
+And now let's calculate $y$ using this design matrix, and plot the result:
+
+```{r}
+
+linpred_i <- A_ik %*% beta_k
+
+plot(x_1, linpred_i)
+
+```
+If this is confusing, think through some examples and do the simple algebra yourself to intuit what's going on.
+
+
+As a last step, I'll add some stochastic noise to get our simulated observed data, stored in the `obs_i` vector. Then I'll plot `x_i` against `obs_i`
 
 ```{r}
 ##sy: add some stochastic noise
@@ -98,12 +148,16 @@ p<-plot(x_1, obs_i)
 
 ```
 
+#### 1.ab Run a broken stick as a linear regression
+
+A great feature of the aggregator design matrix is that it let's us use software like ``lm()`` or ``lmer()`` to run broken stick (or other spline models), since we are just giving it some variables
+
 For this simulation I set $\beta_{1,1}=0.5$ and $\beta_{1,2}=2.5$. You can see that the slope changes where $x_1=0$. 
 
 
 
 #### 1.ac Fitting a broken stick model
-We could run a model capturing this unique relationship in $y$ and $x_1$. But how would I create a design matrix such that I would fit two betas for a single predictor variable? There are more than one approaches to do this, but I'll use an **aggregator** method 
+We could run a model capturing this unique relationship in $y$ and $x_1$. But how would I create a design matrix such that I would fit two betas for a single predictor variable?  
 
 but there are a couple issues with implementing a "broken stick" model:
 
