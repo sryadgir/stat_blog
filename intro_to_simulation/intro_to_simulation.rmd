@@ -1,0 +1,388 @@
+---
+title: "Testing models with simulation"
+author: Simon Yadgir
+date: "`r Sys.Date()`"
+
+output:
+  rmdformats::readthedown:
+    bookdown: true
+    highlight: tango
+    df_print: kable
+    toc_depth: 2
+    
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(data.table)
+library(ggplot2)
+
+```
+
+# Introduction
+
+Simulation is a powerful tool that has a plethora of statistical uses. One use, **simulation for testing models**, lets us validate the robustness of statistical software, test model assumptions, and learn how our models work. It is a crucial step when using new or complex software, to make sure the model is doing what you think it is. It is also necessary when developing custom statistical models with packages like `rstan` and `TMB`. 
+
+The goal of this notebook is to use simulation to learn more about linear regression, and to provide a simple framework for using simulation to test statistical models. 
+
+## Simulation framework
+
+Simulations used to test models follow the same general steps (in my experience):
+
+Simulations (in my experience) follow the same general steps:
+
+1. Simulate a data-generating process
+    + 1a. Create a data set of predictor variables
+    + 1b. Create 'true' values for every parameter estimated in the model
+    + 1c. Calculate 'true' values of the outcome for each observation in the fake dataset
+    + 1d. Add stochastic components to the 'true' outcome values to get an 'observed' outcome
+2. Run the model using the fake dataset to predict the 'observed' outcome
+3. Compare the fitted parameters from the model to the 'true' parameter values
+
+# Simulate a data-generating process
+
+Linear regression (and most statistical models) has the goal of estimating a relationship between different pieces of data. We typically don't know the true relationships we are trying to estimate. The 'true relationships' are called the **data-generating process**, in other words, the unknown reality that we are trying to approximate with our model.
+
+Simulation studies let us define our own data-generating process, because we make our own data and the relationships that are usually unknown to us.
+
+## The importance of model specification
+
+We have to decide whether or not the data we create to perfectly imitate the model we will test. The case where the model used does not match the data-generating process is called **model mis-specification**, and is a hugely important concept in statistical modelling. Below are the reasons why you might simulate a correctly specified vs a mis-specified dataset
+
+
+Correctly specified | Mis-specified
+------------- | -------------
+Learning how a model works | Testing model assumptions
+Testing new modelling software | Comparing performance of different models
+
+Because the goal of this post is to understand how linear regression works, we will have the model exactly match the data generating process. In other words, we'll generate our dataset from a linear regression. If we find that the model does a poor job of fitting the data, then either there's something wrong with our software, or we simulated the data incorrectly (and maybe we don't really understand how the model works). In either case, simulation has identified for us a problem that we can fix by iteratively debugging and simulating.
+
+## Create a data set of predictor variables
+
+As a reminder, in linear regression we have some **outcome variable**, let's call it $y$, and some number of **predictor variables**, let's call them ${x_1, x_2, x_3..., x_k}$, where $k$ is the number of predictor variables.
+
+Below I'm going to simulate some predictor variables (I'll simulate the outcome later). I do this by creating what's called a **design matrix**, referred to as $X$. A design matrix holds the values of the predictor variables for each observation in our dataset. It's a matrix with the number of observations = $n$ rows, and the number of predictor variables = $k$ columns. I use $i$ to denote a row index and $j$ to denote a column index.
+
+### Sidenote on the intercept
+
+One common feature of linear regression is to have an **intercept**, or a predictor variable that is constant for each observation. In the design matrix, every observation has a value of '1'. Treating the intercept as a predictor variable is useful in terms of simplifying the math, though commonly it is treated separately from the real predictors.
+
+### Data simulation code
+
+In the code below I'll simulate 1000 observations, and 4 predictor variables. I'm making them all binary variables for simplicity, but they can take on any value.
+
+
+```{r}
+##sy: determine number of observations and predictor variables
+n<-1000
+k<-4
+
+##sy: Create a fake value for each observation, for each predictor variable
+##sy: I'm doing this in a for loop for clarity, I'd normally use sapply
+
+X <- matrix(nrow = n, ncol = k)
+for(i in 1:n){
+  for(j in 1:k){
+    
+    ##sy: first column is for the intercept, so every observation is 1
+    if(j==1){
+      X[i, j] <- 1
+    }else{
+      ##sy: pick 0 or 1 for binary predictor variables
+      X[i, j] <- sample(x = c(1, 0), size = 1)
+    }
+  }
+}
+colnames(X)<-paste0("x_", 1:k)
+rownames(X)<-paste0("i_", 1:n)
+
+##sy: take a peak at the design matrix X
+head(X)
+
+
+```
+
+
+
+
+## Create 'true' values for every parameter
+
+Linear regression models assume that there is a linear relationship between the outcome $y$ and each predictor variable. The goal of linear regression is estimate each of these linear relationships, in other words they are the **parameters** of the model. Let's call these parameters ${\beta_1, \beta_2, \beta_3...,\beta_k}$. As you'd expect, there are the same number of these parameters as there are predictor variables ($k$).
+
+Below I'll simulate $k$ fake parameters, one for each predictor variable. This represents the true linear relationship between each predictor variable and the outcome. $\beta_1$ is the interecept parameter, since $x_1$ takes the same value for all observations.
+
+```{r}
+##sy: I'm going to use the runif() function to pick random numbers to represent the beta parameters
+betas <- runif(n = (k), min = -1, max = 1)
+names(betas)<-c(paste0("beta_", 1:k))
+print(betas)
+
+```
+
+
+
+## Calculate 'true' values of the outcome
+
+For any combination of our predictors, we can calculate $y$, given we know the best parameters for the equation. This estimate of y is commonly called the **linear predictor**, represented in the equation below as $\mu$. Remember there is a linear predictor for each observation, denoted by $i$
+
+$$
+\mu_i=\sum_{j=1}^k{\beta_j*x_{ij}} 
+$$
+
+Below I'll calculate the linear predictor for each observation in our simulation. These represent the 'true' value of $y$, as predicted from our predictor variables
+
+
+```{r}
+
+##sy: I'll first calculate the linear predictor with a for loop for clarity
+mus<-matrix(nrow = n, ncol = 1)
+for(i in 1:n){
+  
+  ##sy: I'll let mu_i hold the linear predictor for each observation
+  mu_i <- 0
+  for(j in 1:(k)){
+    
+    ##sy: add the intercept
+    mu_i <- mu_i + betas[j] * X[i, j]
+    
+    mus[i, 1] <- mu_i
+  }
+}
+
+colnames(mus)<-paste0("mu")
+rownames(mus)<-paste0("i_", 1:n)
+
+##sy: look at the head of mus
+head(mus)
+
+
+```
+Below I calculate the same as above, this time using the matrix math syntax in R. Much cleaner, but a bit more esoteric. We get the same answer.
+```{r}
+##sy: I'll calculate the same thing using the matrix math syntax in R
+mus2 <- X %*% betas
+
+colnames(mus2)<-paste0("mu2")
+rownames(mus2)<-paste0("i_", 1:n)
+
+head(mus2)
+
+```
+
+
+
+## Add stochastic components
+
+So far all we've done is calculate the linear predictor, but linear regression also has a stochastic component. This puts some structure on our model: we will assume that each data point comes from Normal distributions, where the mean is the calculated linear predictor for that observation. The variance of this distribution, $\sigma$, is another parameter that can be estimated. We often don't care too much about this parameter when doing simple linear regression. This part of the model is written formally as:
+
+$$
+y_i\sim N(\mu_i, \sigma^2)
+$$
+Below I'll simulate this stochastic component by adding 'noise' to the linear predictors calculated above. I do this by first creating a fake $\sigma$, and then using the `rnorm()` function in R to get a simulated 'observed' data point, $y$ for each simulated true outcome, $\mu$. This is what we'll give the model to fit.
+
+```{r}
+##sy: get a fake value for sigma using runif. Sigma needs to be positive
+sigma<-runif(1, min=.01, max=4)
+message("Simulated sigma: ", round(sigma, digits=3))
+
+##sy: for clarity, I'm looping through each simulated linear predictor
+##sy: there are more concise/efficient 'vectorized' ways to do the same thing
+obs <- matrix(nrow = n, ncol=1)
+for(i in 1:n){
+  
+  ##sy: note that rnorm() takes 'sigma', not 'sigma^2'
+  obs[i, 1] <- rnorm(n = 1, mean = mus[i], sd=sigma)
+}
+colnames(obs) <- "y"
+
+##sy:bind together with the linear predictors and take a look
+sim_data<-cbind(mus, obs)
+head(sim_data)
+
+```
+
+The larger the $\sigma$, the more we expect $y_i$ to differ from $\mu_i$. 
+
+### An aside on sigma
+
+$\sigma$ is not a measure of uncertainty!
+
+$\sigma$ can be thought of as 'mean deviation from the expected mean outcome', where the mean outcome is $\mu_i$ and a function of the predictor variables for observation $i$. We call 'deviation from the expected outcome' a **residual**.  This is sometimes talked about as **error**, but in reality we expect there to be some unexplained variance in our data even after taking into account the predictor variables. Regardless, we can think of the stochastic part of the model in this way by estimating the error for each observation, called $\epsilon_i$, and adding it to the linear predictor. The full model looks like:
+
+$$
+\mu_i=\sum_{j=1}^k{\beta_j*X_{ij}} \\
+\epsilon_i\sim N(0, \sigma^2) \\
+y_i=\mu_i+\epsilon_i
+$$
+
+This is just a re-written version of normal linear regression, but thinking about the stochastic component in this way can be helpful in understanding more complicated methods used to explain variance in regression models (such as linear regression, overdispersion, and z-covariates).
+
+# Run the model
+
+Now I'll use the `lm()` R function to fit linear regression on our simulated data. In another post I hope to go into more detail about how this works. Our full model in stats-talk is below:
+
+$$
+\mu_i=\sum_{j=1}^k{\beta_j*X_{ij}} \\
+y_i\sim N(\mu_i, \sigma^2)
+$$
+First I'll get the data ready in R and create an R-style formula:
+```{r}
+
+##sy: I'll store all of our data in a data.table. I usually do this a lot earlier
+dt <- as.data.table(cbind(sim_data, X))
+message("All data together:")
+head(dt)
+
+##sy: now set up the formula using R syntax. 
+##sy: the "0 + " tells lm() not to add an intercept. We've already acounted for an intercept with our x_1 variable
+form<-paste0("y ~  0 + ", paste0("x_", 1:k, collapse=" + "))
+message("R-style model formula:")
+message(form)
+
+
+```
+
+Finally I'll run the model and print the output
+```{r}
+##sy: run the model
+mod1 <- lm(formula = as.formula(form), data = dt)
+
+print(mod1)
+
+```
+
+
+
+# Compare the fit to the true parameter values
+
+The last step is to check to see how well the model performed, by comparing each fitted parameter to the true value for each parameter we simulated earlier. 
+First I'll just compare the means in a table:
+
+```{r}
+##sy: get coefficients from the model
+fit_betas <- coefficients(mod1)
+
+##sy: also get estimate of sigma. Its not truly 'estimated' in lm(), but it's represented by the standard deviation of the fit residuals (ie, the leftover variance in observed data)
+fit_sigma <- sd(residuals(mod1))
+
+param_dt <- data.table(par = names(betas), fit_par = fit_betas, true_par = betas)
+sigma_row <- data.table(par = "sigma", fit_par = fit_sigma, ture_par = sigma)
+param_dt <- rbindlist(list(param_dt, sigma_row))
+
+print(param_dt)
+
+
+```
+
+Our estimates of the parameters might be different than the true value, did something go wrong? The answer is 'probably not'. Remember, each fit parameter should have some uncertainty associated with it (besides $\sigma$ since it's not truly estimated with `lm()`). One method to empirically evaluate the model fit while taking into account uncertainty is to calculate **coverage**. Coverage tells us whether the true value of the parameter falls between the 95% confidence interval of the estimated parameter. I'll calculate it below:
+
+```{r}
+##sy: first get standard error for each parameter
+##sy: below I'm taking the diagonal of the variance-covariance matrix of the fit parameters.
+##sy: This gives the standard error of each parameter
+ses <- sqrt(diag(vcov(mod1)))
+
+##sy: add an NA for sigma
+ses <- c(ses, NA)
+
+##sy: next I'll calculate the 95% CI for each parameter, and if the true value is contained within it
+##sy: here I'll use some data.table syntax to keep things compact
+param_dt[, se := ses]
+param_dt[, `:=` (lower = fit_par - 1.96 * se, upper = fit_par + 1.96 * se)]
+
+##sy: now calculate coverage
+param_dt[true_par >= lower & true_par <= upper, covered := 1]
+param_dt[is.na(covered), covered := 0]
+  
+##sy: A nice plot to visualize coverage, need to reshape data a bit
+plot_dt <- melt(param_dt, id.vars="par", measure.vars = c("fit_par", "true_par"))
+plot_dt <- merge(plot_dt, param_dt[, .(par, lower, upper)], by="par")
+plot_dt[variable=="true_par", `:=` (lower=NA, upper=NA)]
+
+p<-ggplot(data = plot_dt, aes(x = factor(par), y = value, color = factor(variable)))+
+  geom_point()+
+  geom_errorbar(aes(ymin = lower, ymax = upper), width=0)+
+  xlab("")+
+  ylab("Parameter value")+
+  theme_classic()
+print(p)
+
+```
+
+### Repeating the simulation to calculate coverage
+
+Hopefully most of our parameters are covered. But what if some of them aren't? That's okay too, as long as it's relatively uncommon. Remember that we can expect a 95% CI of an estimate to capture the true parameter 95% of the time. In fact, a simulation study let's us verify that this is the case. We can repeat the simulation, say 300 times, and each time calculate the coverage for each parameter. We'd expect about 95% of the time for the true value to be covered by the 95% CI of the estimate. 
+
+#### Code that puts it all together
+
+Below I'll repeat the above code and plot the coverage for each parameter. This will also show how to run all 6 steps of the simulation in more compact code
+```{r}
+##sy: set simulation toggles
+n_sims <- 300
+n <- 1000
+k <- 4
+
+##sy: loop over simulation
+sim_results <- list()
+for(sim in 1:n_sims){
+  
+  ##sy: Step 1: simulate new data
+  X_sim <- sapply(1:k, function(x){
+    rbinom(n = n, size = 1, prob = 0.25)
+  })
+  ##sy: make first column the intercept
+  X_sim[, 1] <- 1
+  colnames(X_sim) <- paste0("x_", 1:k)
+  
+  ##sy: Step 2: simulate new parameters
+  sim_betas <- runif(n = k, min = -1, max = 1)
+  sim_sigma <- runif(n = 1, min = 0.01, max = 1)
+
+  ##sy: Step 3: calculate linear predictor
+  sim_mus <- X_sim %*% sim_betas
+  
+  ##sy: Step 4: add stochastic component
+  sim_obs <- rnorm(n = length(sim_mus), mean = sim_mus, sd = sim_sigma)
+  
+  ##sy: Step 5: run the model
+  sim_dt <- data.table(mu = as.numeric(sim_mus), y = sim_obs)
+  sim_dt <- as.data.table(cbind(sim_dt, X_sim))
+  form<-paste0("y ~  0 + ", paste0("x_", 1:k, collapse=" + "))
+  sim_mod <- lm(formula = as.formula(form), data = sim_dt)
+  
+  ##sy: Step 6: calculate coverage
+  sim_par_dt <- data.table(sim = sim, 
+                           par = paste0("beta_", 1:k), 
+                           fit_par = coefficients(sim_mod), 
+                           se = sqrt(diag(vcov(sim_mod))),
+                           true_par = sim_betas)
+  sim_par_dt[, `:=` (lower = fit_par - 1.965 * se, upper = fit_par + 1.965 * se)]
+  sim_par_dt[true_par >= lower & true_par <= upper, covered := 1]
+  sim_par_dt[is.na(covered), covered := 0]
+  
+  sim_results[[length(sim_results) + 1]] <- sim_par_dt
+  
+}
+
+##sy: collapse the results and calculate the percentage covered by parameter. Again using data.table syntax
+sim_results <- rbindlist(sim_results)
+
+collapsed <- sim_results[, .(prop_coverage = sum(covered)/n_sims), by = "par"]
+
+##sy: plot results
+p<-ggplot(data=collapsed, aes(x=par, y=prop_coverage, fill=par))+
+  geom_bar(stat="identity")+
+  geom_hline(aes(yintercept=0.95))+
+  guides(fill="none")+
+  theme_classic()
+print(p)
+
+```
+
+Above we have our coverages, they should all be close to 0.95 . If the value is significantly lower than 0.95, then we're probably underestimating uncertainty for that parameter, and if the value is significantly lower than 0.95, we are probably over estimating it. Because we are using `lm()`, well established software for running linear regression, and we are simulating data in the exact way that the model will fit it, we shouldn't get much variation from the 0.95 coverage goal.
+
+
+And that's how to use simulation to test a model! I hope you'll be able to apply this framework to more complicated models, as a tool to test software and to learn more about the underlying statistics.
+
+
